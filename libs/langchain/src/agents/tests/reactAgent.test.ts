@@ -1010,13 +1010,15 @@ describe("createAgent", () => {
   });
 
   it("supports StateSchema in middleware stateSchema", async () => {
-    const { StateSchema } = await import("@langchain/langgraph");
+    const { StateSchema, UntrackedValue } = await import(
+      "@langchain/langgraph"
+    );
 
     // Create middleware with StateSchema instead of Zod object
     const middleware = createMiddleware({
       name: "stateSchemaMiddleware",
       stateSchema: new StateSchema({
-        middlewareValue: z4.string().default("default"),
+        middlewareValue: new UntrackedValue<string>(),
       }),
       contextSchema: z4.object({
         middlewareContext: z4.number(),
@@ -1364,6 +1366,133 @@ describe("createAgent", () => {
 
       expect(capturedMetadata).toBeDefined();
       expect(capturedMetadata?.lc_agent_name).toBeUndefined();
+    });
+  });
+
+  describe("model router", () => {
+    const makeTool = (name: string) =>
+      tool((_input: { input: string }) => `result from ${name}`, {
+        name,
+        description: `Tool ${name}`,
+        schema: z.object({ input: z.string() }),
+      });
+
+    it("executes all tool calls when the model returns multiple", async () => {
+      const toolA = makeTool("toolA");
+      const toolB = makeTool("toolB");
+
+      const model = new FakeToolCallingChatModel({
+        responses: [
+          new AIMessage({
+            content: "",
+            tool_calls: [
+              { name: "toolA", id: "call-1", args: { input: "a" } },
+              { name: "toolB", id: "call-2", args: { input: "b" } },
+            ],
+          }),
+          new AIMessage("done"),
+        ],
+      });
+
+      const agent = createAgent({ model, tools: [toolA, toolB] });
+
+      const result = await agent.invoke({
+        messages: [new HumanMessage("run both tools")],
+      });
+
+      const toolMessages = result.messages.filter(ToolMessage.isInstance);
+      expect(toolMessages).toHaveLength(2);
+      expect(toolMessages.map((m) => m.name).sort()).toEqual([
+        "toolA",
+        "toolB",
+      ]);
+    });
+
+    it("exits when AIMessage has no tool_calls", async () => {
+      const toolA = makeTool("toolA");
+      const model = new FakeToolCallingChatModel({
+        responses: [
+          new AIMessage({ content: "no tools needed", tool_calls: [] }),
+        ],
+      });
+      const resultEmpty = await createAgent({
+        model,
+        tools: [toolA],
+      }).invoke({ messages: [new HumanMessage("hi")] });
+      expect(resultEmpty.messages).toHaveLength(2);
+      expect(resultEmpty.messages[1].content).toBe("no tools needed");
+    });
+
+    it("exits when ALL tool calls are extract-* (structured response extraction)", async () => {
+      const WeatherSchema = z.object({
+        temperature: z.number(),
+      });
+
+      // Use toolStrategy to get the auto-generated extract-* tool name
+      // so the model's tool_calls match what AgentNode registers internally.
+      const responseFormat = toolStrategy(WeatherSchema);
+      const extractToolName = responseFormat[0].tool.function.name;
+
+      const model = new FakeToolCallingModel({
+        toolCalls: [
+          [{ name: extractToolName, id: "ext-1", args: { temperature: 72 } }],
+        ],
+      });
+
+      const getWeather = makeTool("getWeather");
+      const agent = createAgent({
+        model,
+        tools: [getWeather],
+        responseFormat,
+      });
+
+      const result = await agent.invoke({
+        messages: [new HumanMessage("What is the weather?")],
+      });
+
+      expect(result.structuredResponse).toEqual({ temperature: 72 });
+      // No real tool was executed — router exited immediately
+      expect(
+        result.messages.filter(
+          (m) => ToolMessage.isInstance(m) && m.name === "getWeather"
+        )
+      ).toHaveLength(0);
+    });
+
+    it("executes only regular tool calls when extract-* calls are mixed in", async () => {
+      const toolA = makeTool("toolA");
+
+      const model = new FakeToolCallingChatModel({
+        responses: [
+          new AIMessage({
+            content: "",
+            tool_calls: [
+              { name: "toolA", id: "call-1", args: { input: "a" } },
+              {
+                name: "extract-response",
+                id: "ext-1",
+                args: { value: 42 },
+              },
+            ],
+          }),
+          new AIMessage("done"),
+        ],
+      });
+
+      const agent = createAgent({
+        model,
+        tools: [toolA],
+        version: "v2",
+      });
+
+      const result = await agent.invoke({
+        messages: [new HumanMessage("mixed calls")],
+      });
+
+      // Only toolA should have been executed — extract-response is filtered out
+      const toolMessages = result.messages.filter(ToolMessage.isInstance);
+      expect(toolMessages).toHaveLength(1);
+      expect((toolMessages[0] as ToolMessage).name).toBe("toolA");
     });
   });
 });
