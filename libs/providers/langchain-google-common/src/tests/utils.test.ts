@@ -1092,3 +1092,63 @@ describe("gemini empty text content handling", () => {
     expect(textPart.text).toBe("I am doing well");
   });
 });
+
+describe("gemini thought part handling", () => {
+  function buildResponse(parts: any[]) {
+    return {
+      data: {
+        candidates: [
+          {
+            content: { role: "model", parts },
+            finishReason: "STOP",
+            index: 0,
+            safetyRatings: [],
+          },
+        ],
+      },
+    } as any;
+  }
+
+  test("thought parts are excluded from AIMessage.content", () => {
+    const api = getGeminiAPI();
+    const response = buildResponse([
+      { text: "internal reasoning here", thought: true },
+      { text: "final answer" },
+    ]);
+
+    const result = api.responseToChatResult(response);
+    const message = result.generations[0].message;
+
+    expect(message.content).toBe("final answer");
+  });
+
+  test("thought part with functionCall preserves signatures across round-trip", async () => {
+    const api = getGeminiAPI();
+    const response = buildResponse([
+      {
+        text: "thinking about which tool to call",
+        thought: true,
+        thoughtSignature: "sig-thought",
+      },
+      {
+        functionCall: { name: "search", args: { query: "hi" } },
+        thoughtSignature: "sig-call",
+      },
+    ]);
+
+    const aiMessage = api.responseToChatResult(response).generations[0]
+      .message;
+    const formatted = (await api.formatData(
+      [new HumanMessage("hi"), aiMessage],
+      {}
+    )) as GeminiRequest;
+    const modelContent = formatted.contents?.find((c) => c.role === "model");
+
+    expect(modelContent?.parts).toEqual([
+      {
+        functionCall: { name: "search", args: { query: "hi" } },
+        thoughtSignature: "sig-call",
+      },
+    ]);
+  });
+});

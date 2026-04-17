@@ -1368,6 +1368,9 @@ export function getGeminiAPI(config?: GeminiAPIConfig): GoogleAIAPI {
     const text = partToText(part);
     // oxlint-disable-next-line @typescript-eslint/no-explicit-any
     const generationInfo: Record<string, any> = {};
+    if ("thought" in part && part.thought) {
+      generationInfo.thought = true;
+    }
 
     return new ChatGenerationChunk({
       text,
